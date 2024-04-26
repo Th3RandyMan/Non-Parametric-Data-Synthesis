@@ -1,1 +1,1 @@
-# Non-Parametric-Data-Synthesis
+# Non-Parametric Data Synthesis
