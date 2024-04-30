@@ -1,5 +1,6 @@
 import glob
 import random
+from typing import Tuple
 import numpy as np
 from PIL import Image
 import time
@@ -8,7 +9,7 @@ import os
 
 
 # Get patches for the image
-def get_patches(image_array, kernel_size, stride:int=1):
+def get_patches(image_array:np.ndarray, kernel_size:int, stride:int=1) -> np.ndarray:
     patches = []
     for i in range(0, image_array.shape[0]-kernel_size, stride):
         for j in range(0, image_array.shape[1]-kernel_size, stride):
@@ -16,13 +17,13 @@ def get_patches(image_array, kernel_size, stride:int=1):
             patches.append(patch)
     return np.array(patches)
 
-def create_gaussian_kernel(kernel_size, sigma=None):
+def create_gaussian_kernel(kernel_size:int, sigma=None) -> np.ndarray:
     if sigma is None:
         sigma = 0.3 * ((kernel_size - 1) * 0.5 - 1) + 0.8   # Scaling sigma based on kernel size, may need to adjust the coefficients
     kernel = np.fromfunction(lambda x, y: (1/(2*np.pi*sigma**2)) * np.exp(-((x-(kernel_size-1)/2)**2 + (y-(kernel_size-1)/2)**2)/(2*sigma**2)), (kernel_size, kernel_size))
     return kernel / np.sum(kernel)
 
-def initialize_synthesized_image(example_img, synth_size, patch_size=3):
+def initialize_synthesized_image(example_img:np.ndarray, synth_size:Tuple[int,int], patch_size:int=3) -> Tuple[np.ndarray, np.ndarray]:
     diff = patch_size // 2
 
     # Create a blank image to store the synthesized image
@@ -62,7 +63,7 @@ def initialize_synthesized_image(example_img, synth_size, patch_size=3):
 
     return synthesized_img, potential_map 
 
-def get_target_patch(synthesized_img, potential_map, i, j, kernel_size, diff):
+def get_target_patch(synthesized_img:np.ndarray, potential_map:np.ndarray, i:int, j:int, kernel_size:int, diff:int) -> Tuple[np.ndarray, np.ndarray]:
     # Create a zero matrix to store the target patch
     target_patch = np.zeros((kernel_size, kernel_size, synthesized_img.shape[-1]))
     patch_mask = np.zeros((kernel_size, kernel_size))
@@ -80,7 +81,7 @@ def get_target_patch(synthesized_img, potential_map, i, j, kernel_size, diff):
     return target_patch, np.repeat(patch_mask[:,:,np.newaxis], synthesized_img.shape[-1], axis=2)
         
 
-def find_best_matching_patch(example_patches, target_patch, patch_mask, gaussian_kernel, theshold = 0.8, attenuation_factor=80):
+def find_best_matching_patch(example_patches:np.ndarray, target_patch:np.ndarray, patch_mask:np.ndarray, gaussian_kernel:np.ndarray, threshold:float = 0.8, attenuation_factor:float=80) -> np.ndarray:
     # Calculate the squared difference between the target patch and all example patches
     patches = np.copy(example_patches)
     patches -= target_patch # In place operations is faster than a single line operation
@@ -91,7 +92,7 @@ def find_best_matching_patch(example_patches, target_patch, patch_mask, gaussian
 
     # Convert the squared differences to probabilities
     prob = 1 - squared_diffs / np.max(squared_diffs)
-    prob *= (prob > theshold*np.max(prob))  # thresholding the probabilities
+    prob *= (prob > threshold*np.max(prob))  # thresholding the probabilities
     prob = prob**attenuation_factor  # attenuate the probabilities
     prob /= np.sum(prob)  # normalize the probabilities
     
@@ -100,9 +101,9 @@ def find_best_matching_patch(example_patches, target_patch, patch_mask, gaussian
     
     return example_patches[best_matching_patch_index]
 
-def synthesize_texture(example_img, synth_size, kernel_size, sigma=3):
+def synthesize_texture(example_img:np.ndarray, synth_size:Tuple[int,int], kernel_size:int, sigma:float=3, patch_size:int=3, threshold:float=0.8, attenuation_factor:float=80) -> np.ndarray:
     # Initialize the synthesized image and potential map
-    synthesized_img, potential_map = initialize_synthesized_image(example_img, synth_size)  # get started with a random patch and potential map
+    synthesized_img, potential_map = initialize_synthesized_image(example_img, synth_size, patch_size=patch_size)  # get started with a random patch and potential map
     
     # Get patches for the example image
     example_patches = get_patches(example_img, kernel_size) # get all the patches from the example image
@@ -115,13 +116,15 @@ def synthesize_texture(example_img, synth_size, kernel_size, sigma=3):
     n_no_pixels = np.where(potential_map != 0)[0].shape[0]
     
     # Iterate over the pixels in the synthesized image
-    perc = 0 #0.1
-    print(f"Processing pixel 0 of {n_no_pixels}")
+    perc = 0.1
+    #print(f"Processing pixel 0 of {n_no_pixels}")
     for n_pixel in range(n_no_pixels):
-        if n_pixel / n_no_pixels > perc:
+        pe = n_pixel / n_no_pixels
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print(f"Progress: {pe*100:.4f}%")
+        if pe > perc:
             #print(f"Processing pixel {n_pixel} of {n_no_pixels}")
-            os.system('cls' if os.name == 'nt' else 'clear')
-            print(f"Progress: {perc*100:.1f}%")
+            break
             # plt.imshow(synthesized_img)
             # plt.axis('off')
             # plt.savefig(f"img7_{perc*100:.1f}.png")
@@ -136,7 +139,7 @@ def synthesize_texture(example_img, synth_size, kernel_size, sigma=3):
         # target_patch = synthesized_img[i-diff:i+diff+1, j-diff:j+diff+1, :]
         
         # Find the best matching patch from the example image
-        best_matching_patch = find_best_matching_patch(example_patches, target_patch, patch_mask, gaussian_kernel)    # BROKEN, NEEDS TO BE FIXED
+        best_matching_patch = find_best_matching_patch(example_patches, target_patch, patch_mask, gaussian_kernel, threshold=threshold, attenuation_factor=attenuation_factor)    # BROKEN, NEEDS TO BE FIXED
                 
         # Replace the pixel with the center pixel of the best matching patch
         synthesized_img[i, j] = np.copy(best_matching_patch[diff, diff])
@@ -169,7 +172,7 @@ if __name__ == '__main__':
                         start = time.perf_counter()
                         synthesized_img = synthesize_texture(image_array, SYNTH_SIZE, kernel_size, sigma, patch_size, threshold, attenuation_factor)
                         # Save the synthesized image using matplotlib
-                        save_path = f"img7_{threshold}_{attenuation_factor}_{patch_size}_{kernel_size}_{sigma}.png"
+                        save_path = f"Synthesized Images\img7_{threshold}_{attenuation_factor}_{patch_size}_{kernel_size}_{sigma}.png"
                         plt.imsave(save_path, synthesized_img)
                         print(f"Synthesized image saved at {save_path}")
                         print(f"\tTime taken: {time.perf_counter() - start} seconds")
