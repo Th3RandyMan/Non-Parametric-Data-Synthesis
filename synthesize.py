@@ -7,6 +7,17 @@ import random
 
 class Synthesize:
     def __init__(self, example_image:np.ndarray, synth_size:Tuple[int,int], kernel_size:int, start_patch_size:int, sigma:float=3.0, threshold:float=0.8, attenuation_factor:float=80, save_path:str=None):
+        """
+        Synthesize an image using the given example image.
+        :param example_image: The example image to synthesize
+        :param synth_size: The size of the synthesized image. Given as (height, width)
+        :param kernel_size: The size of the kernel for the window search
+        :param start_patch_size: The size of the starting patch
+        :param sigma: Standard deviation of the Gaussian kernel
+        :param threshold: Threshold for the probabilities
+        :param attenuation_factor: Attenuation factor for the probabilities
+        :param save_path: Path to save the synthesized image over the iterations
+        """
         self.example_image = example_image
         self.synth_size = synth_size
         self.kernel_size = kernel_size
@@ -19,8 +30,8 @@ class Synthesize:
         self.height, self.width = self.example_image.shape[:2]
         self.half_kernel = self.kernel_size // 2
         self.synth_image, self.potential_map = self._initialize_synthesized_image()
-        self.example_patches = self._get_patches(example_image)
-        self.gaussian_kernel = np.repeat(self._create_gaussian_kernel(kernel_size, sigma)[:,:,np.newaxis], example_image.shape[-1], axis=2)
+        self.example_patches = self._get_patches(example_image).astype(np.float32)
+        self.gaussian_kernel = np.repeat(self._create_gaussian_kernel(kernel_size, sigma)[:,:,np.newaxis], example_image.shape[-1], axis=2).astype(np.float32)
 
         self._synthesize()
 
@@ -33,7 +44,7 @@ class Synthesize:
         diff = self.start_patch_size // 2
 
         # Create a blank image to store the synthesized image
-        synthesized_img = np.zeros(self.synth_size + (self.example_image.shape[-1],))
+        synthesized_img = np.zeros(self.synth_size + (self.example_image.shape[-1],), dtype=float)
         potential_map = np.zeros(self.synth_size, dtype=int)
 
         # Randomly select a 3x3 patch to add to the center of the synthesized image
@@ -68,25 +79,37 @@ class Synthesize:
 
         return synthesized_img, potential_map
     
-    def _get_patches(self, img, stride:int=1):
+    def _get_patches(self, img:np.ndarray, stride:int=1) -> np.ndarray:
+        """
+        Get patches of the given image.
+        """
         patches = []
         height, width = img.shape[:2]
-        for i in range(height - self.kernel_size, stride):
-            for j in range(width - self.kernel_size, stride):
-                patch = img[i:i+self.kernel_size, j:j+self.kernel_size]
+        for i in range(0, height - self.kernel_size, stride):
+            for j in range(0, width - self.kernel_size, stride):
+                patch = img[i:i+self.kernel_size, j:j+self.kernel_size] / 255.0
                 patches.append(patch)
         return np.array(patches)
     
     def _create_gaussian_kernel(self, size, sigma=None):
+        """
+        Create a 2D Gaussian kernel of the given size.
+        :param size: The size of the kernel
+        :param sigma: The standard deviation of the Gaussian kernel
+        """
         if sigma is None:
             sigma = 0.3 * ((size - 1) * 0.5 - 1) + 0.8
         kernel = np.fromfunction(lambda x, y: (1/(2*np.pi*sigma**2)) * np.exp(-((x-(self.kernel_size-1)/2)**2 + (y-(self.kernel_size-1)/2)**2)/(2*sigma**2)), (self.kernel_size, self.kernel_size))
         return kernel / np.sum(kernel)
 
     def _synthesize(self):
+        """
+        Synthesize the image by filling the pixels with reference to the potential map.
+        """
         n_no_pixels = np.where(self.potential_map != 0)[0].shape[0]   # Number of pixels that have not been processed
 
         perc = 0.1
+        print(f"Starting to fill {n_no_pixels} pixels...")
         # Iterate over the unfilled pixels in the synthesized image
         for n_pixel in range(n_no_pixels):
             if n_pixel/n_no_pixels > perc:
@@ -110,6 +133,11 @@ class Synthesize:
         #return self.synth_image
 
     def _get_target_patch(self, y, x):
+        """
+        Get the target patch from the synthesized image.
+        :param y: The y-coordinate of the target patch center
+        :param x: The x-coordinate of the target patch center
+        """
         # Create a zero matrix to store the target patch
         target_patch = np.zeros((self.kernel_size, self.kernel_size, self.synth_image.shape[-1]))
         patch_mask = np.zeros((self.kernel_size, self.kernel_size))
@@ -127,8 +155,19 @@ class Synthesize:
         return target_patch, np.repeat(patch_mask[:,:,np.newaxis], self.synth_image.shape[-1], axis=2)
     
     def _find_best_patch(self, target_patch, patch_mask):
-                # Calculate the squared difference between the target patch and all example patches
-        squared_diffs = np.sum(self.gaussian_kernel * ( patch_mask * (self.example_patches - target_patch))**2, axis=(1, 2, 3)) # sum over the height, width, and channels with gaussian weighting
+        """
+        Find the best matching patch from the example image with respect to the target patch.
+        :param target_patch: The target patch from the synthesized image
+        :param patch_mask: The mask for the target patch
+        """
+        # Calculate the squared difference between the target patch and all example patches
+        patches = np.copy(self.example_patches)
+        #squared_diffs = np.sum(self.gaussian_kernel * ( patch_mask * (self.example_patches - target_patch))**2, axis=(1, 2, 3)) # sum over the height, width, and channels with gaussian weighting
+        patches -= target_patch
+        patches *= patch_mask
+        patches **= 2
+        patches *- self.gaussian_kernel
+        squared_diffs = np.sum(patches, axis=(1, 2, 3))
 
         # Convert the squared differences to probabilities
         prob = 1 - squared_diffs / np.max(squared_diffs)
@@ -142,6 +181,13 @@ class Synthesize:
         return self.example_patches[best_matching_patch_index]
     
     def plot_example_patches(self, n:int=5, m:int=5, figsize=(15, 15), save_path=None):
+        """
+        Plot the example patches.
+        :param n: Number of rows of the plot
+        :param m: Number of columns of the plot
+        :param figsize: Size of the figure
+        :param save_path: Path to save the plot
+        """
         fig, ax = plt.subplots(n, m, figsize=figsize)
         for i in range(n):
             for j in range(m):
@@ -154,6 +200,11 @@ class Synthesize:
             plt.show()
 
     def plot_synthesized_image(self, figsize=(10, 10), save_path=None):
+        """
+        Plot the synthesized image.
+        :param figsize: Size of the figure
+        :param save_path: Path to save the plot
+        """
         plt.figure(figsize=figsize)
         plt.imshow(self.synth_image)
         plt.axis('off')
@@ -164,6 +215,11 @@ class Synthesize:
             plt.show()
 
     def plot_potential_map(self, figsize=(10, 10), save_path=None):
+        """
+        Plot the potential map used.
+        :param figsize: Size of the figure
+        :param save_path: Path to save the plot
+        """
         _, potential_map = self._initialize_synthesized_image()
 
         plt.figure(figsize=figsize)
@@ -175,8 +231,6 @@ class Synthesize:
         else:
             plt.show()
     
-
-
 
 if __name__ == '__main__':
     IMG_NUM = -3
