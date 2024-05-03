@@ -4,39 +4,42 @@ from typing import Tuple
 import numpy as np
 from PIL import Image
 import time
-import matplotlib.pyplot as plt
 import os
+import jax
+from jax import grad, jit, vmap
 
+import matplotlib.pyplot as plt
+import jax.numpy as jnp
 
 # Get patches for the image
-def get_patches(image_array:np.ndarray, kernel_size:int, stride:int=1) -> np.ndarray:
+def get_patches(image_array:jnp.ndarray, kernel_size:int, stride:int=1) -> jnp.ndarray:
     patches = []
     for i in range(0, image_array.shape[0]-kernel_size, stride):
         for j in range(0, image_array.shape[1]-kernel_size, stride):
             patch = image_array[i:i+kernel_size, j:j+kernel_size, :] / 255.0
             patches.append(patch)
-    return np.array(patches)
+    return jnp.array(patches)
 
-def create_gaussian_kernel(kernel_size:int, sigma=None) -> np.ndarray:
+def create_gaussian_kernel(kernel_size:int, sigma=None) -> jnp.ndarray:
     if sigma is None:
         sigma = 0.3 * ((kernel_size - 1) * 0.5 - 1) + 0.8   # Scaling sigma based on kernel size, may need to adjust the coefficients
-    kernel = np.fromfunction(lambda x, y: (1/(2*np.pi*sigma**2)) * np.exp(-((x-(kernel_size-1)/2)**2 + (y-(kernel_size-1)/2)**2)/(2*sigma**2)), (kernel_size, kernel_size))
-    return kernel / np.sum(kernel)
+    kernel = jnp.fromfunction(lambda x, y: (1/(2*jnp.pi*sigma**2)) * jnp.exp(-((x-(kernel_size-1)/2)**2 + (y-(kernel_size-1)/2)**2)/(2*sigma**2)), (kernel_size, kernel_size))
+    return kernel / jnp.sum(kernel)
 
-def initialize_synthesized_image(example_img:np.ndarray, synth_size:Tuple[int,int], patch_size:int=3) -> Tuple[np.ndarray, np.ndarray]:
+def initialize_synthesized_image(example_img:jnp.ndarray, synth_size:Tuple[int,int], patch_size:int=3) -> Tuple[jnp.ndarray, jnp.ndarray]:
     diff = patch_size // 2
 
     # Create a blank image to store the synthesized image
-    synthesized_img = np.zeros(synth_size + (example_img.shape[-1],), dtype=np.float32)
-    potential_map = np.zeros(synth_size, dtype=int)
-    #visited_map = np.zeros(synth_size, dtype=bool)
+    synthesized_img = jnp.zeros(synth_size + (example_img.shape[-1],), dtype=jnp.float32)
+    potential_map = jnp.zeros(synth_size, dtype=int)
+    #visited_map = jnp.zeros(synth_size, dtype=bool)
 
     # Randomly select a 3x3 patch to add to the center of the synthesized image
     center_i = (synthesized_img.shape[0] // 2)
     center_j = (synthesized_img.shape[1] // 2)
     row = random.randint(0, example_img.shape[0] - patch_size)
     col = random.randint(0, example_img.shape[1] - patch_size)
-    synthesized_img[center_i-diff:center_i+diff+1, center_j-diff:center_j+diff+1] = example_img[row:row+patch_size, col:col+patch_size,:]/255.0
+    synthesized_img = jax.ops.index_update(synthesized_img, jax.ops.index[center_i-diff:center_i+diff+1, center_j-diff:center_j+diff+1], example_img[row:row+patch_size, col:col+patch_size,:]/255.0)
 
     # Update the potential map as distance from the center patch    # CHANGE THIS TO BE LIST OF PIXELS IN ORDER OF PROCESSING
     for i in range(synthesized_img.shape[0]):
@@ -56,54 +59,52 @@ def initialize_synthesized_image(example_img:np.ndarray, synth_size:Tuple[int,in
             else:
                 c_j = j
 
-            potential_map[i,j] = (i - c_i)**2 + (j - c_j)**2
+            potential_map = jax.ops.index_update(potential_map, jax.ops.index[i,j], (i - c_i)**2 + (j - c_j)**2)
 
-    potential_map = np.max(potential_map) - potential_map + 1
-    potential_map[center_i-diff:center_i+diff+1, center_j-diff:center_j+diff+1] = 0
+    potential_map = jnp.max(potential_map) - potential_map + 1
+    potential_map = jax.ops.index_update(potential_map, jax.ops.index[center_i-diff:center_i+diff+1, center_j-diff:center_j+diff+1], 0)
 
     return synthesized_img, potential_map 
 
-def get_target_patch(synthesized_img:np.ndarray, potential_map:np.ndarray, i:int, j:int, kernel_size:int, diff:int) -> Tuple[np.ndarray, np.ndarray]:
+def get_target_patch(synthesized_img:jnp.ndarray, potential_map:jnp.ndarray, i:int, j:int, kernel_size:int, diff:int) -> Tuple[jnp.ndarray, jnp.ndarray]:
     # Create a zero matrix to store the target patch
-    target_patch = np.zeros((kernel_size, kernel_size, synthesized_img.shape[-1]))
-    patch_mask = np.zeros((kernel_size, kernel_size))
+    target_patch = jnp.zeros((kernel_size, kernel_size, synthesized_img.shape[-1]))
+    patch_mask = jnp.zeros((kernel_size, kernel_size))
 
     start_i, start_j = max(i-diff, 0), max(j-diff, 0)
     end_i, end_j = min(i+diff+1, synthesized_img.shape[0]), min(j+diff+1, synthesized_img.shape[1])
 
     # Copy the patch from the synthesized image to the target patch
-    target_patch[start_i-i+diff:end_i-i+diff, start_j-j+diff:end_j-j+diff] = synthesized_img[start_i:end_i, start_j:end_j]
+    target_patch = jax.ops.index_update(target_patch, jax.ops.index[start_i-i+diff:end_i-i+diff, start_j-j+diff:end_j-j+diff], synthesized_img[start_i:end_i, start_j:end_j])
 
     # Create mask for known pixels
-    patch_mask[start_i-i+diff:end_i-i+diff, start_j-j+diff:end_j-j+diff] = potential_map[start_i:end_i, start_j:end_j]
+    patch_mask = jax.ops.index_update(patch_mask, jax.ops.index[start_i-i+diff:end_i-i+diff, start_j-j+diff:end_j-j+diff], potential_map[start_i:end_i, start_j:end_j])
     patch_mask = (patch_mask == 0)
 
-    return target_patch, np.repeat(patch_mask[:,:,np.newaxis], synthesized_img.shape[-1], axis=2)
+    return target_patch, jnp.repeat(patch_mask[:,:,jnp.newaxis], synthesized_img.shape[-1], axis=2)
         
 
-def find_best_matching_patch(example_patches:np.ndarray, target_patch:np.ndarray, patch_mask:np.ndarray, gaussian_kernel:np.ndarray, threshold:float = 0.8, attenuation_factor:float=80) -> np.ndarray:
+def find_best_matching_patch(example_patches:jnp.ndarray, target_patch:jnp.ndarray, patch_mask:jnp.ndarray, gaussian_kernel:jnp.ndarray, threshold:float = 0.8, attenuation_factor:float=80) -> jnp.ndarray:
     # Calculate the squared difference between the target patch and all example patches
-    patches = np.copy(example_patches)
+    patches = jnp.copy(example_patches)
     patches -= target_patch # In place operations is faster than a single line operation
     patches *= patch_mask
-    #patches **= 2
-    #patches *= gaussian_kernel  # MIGHT NEED TO MOVE THIS UP ONE LINE, BEFORE SQUARING
-    patches *= gaussian_kernel
     patches **= 2
-    squared_diffs = np.sum(patches, axis=(1, 2, 3))
+    patches *= gaussian_kernel
+    squared_diffs = jnp.sum(patches, axis=(1, 2, 3))
 
     # Convert the squared differences to probabilities
-    prob = 1 - squared_diffs / np.max(squared_diffs)
-    prob *= (prob > threshold*np.max(prob))  # thresholding the probabilities
+    prob = 1 - squared_diffs / jnp.max(squared_diffs)
+    prob *= (prob > threshold*jnp.max(prob))  # thresholding the probabilities
     prob = prob**attenuation_factor  # attenuate the probabilities
-    prob /= np.sum(prob)  # normalize the probabilities
+    prob /= jnp.sum(prob)  # normalize the probabilities
     
     # Find the index of the best matching patch
-    best_matching_patch_index = np.random.choice(np.arange(example_patches.shape[0]), p=prob)
+    best_matching_patch_index = random.choices(range(example_patches.shape[0]), weights=prob)[0]
     
     return example_patches[best_matching_patch_index]
 
-def synthesize_texture(example_img:np.ndarray, synth_size:Tuple[int,int], kernel_size:int, sigma:float=3, patch_size:int=3, threshold:float=0.8, attenuation_factor:float=80) -> np.ndarray:
+def synthesize_texture(example_img:jnp.ndarray, synth_size:Tuple[int,int], kernel_size:int, sigma:float=3, patch_size:int=3, threshold:float=0.8, attenuation_factor:float=80) -> jnp.ndarray:
     # Initialize the synthesized image and potential map
     synthesized_img, potential_map = initialize_synthesized_image(example_img, synth_size, patch_size=patch_size)  # get started with a random patch and potential map
     
@@ -112,10 +113,10 @@ def synthesize_texture(example_img:np.ndarray, synth_size:Tuple[int,int], kernel
     diff = kernel_size // 2
 
     # Create a Gaussian kernel 
-    gaussian_kernel = np.repeat(create_gaussian_kernel(kernel_size, sigma)[:,:,np.newaxis], example_img.shape[-1], axis=2)  # create a Gaussian kernel
+    gaussian_kernel = jnp.repeat(create_gaussian_kernel(kernel_size, sigma)[:,:,jnp.newaxis], example_img.shape[-1], axis=2)  # create a Gaussian kernel
 
     # Get the number of non-zero pixels in the potential map
-    n_no_pixels = np.where(potential_map != 0)[0].shape[0]
+    n_no_pixels = jnp.where(potential_map != 0)[0].shape[0]
     
     # Iterate over the pixels in the synthesized image
     perc = 0.1
@@ -134,7 +135,7 @@ def synthesize_texture(example_img:np.ndarray, synth_size:Tuple[int,int], kernel
             # perc += 0.1
 
         # Find the pixel coordinates with the highest potential
-        i, j = np.unravel_index(np.argmax(potential_map), potential_map.shape)  # get the pixel with the highest potential
+        i, j = jnp.unravel_index(jnp.argmax(potential_map), potential_map.shape)  # get the pixel with the highest potential
         
         # Get the target patch from the synthesized image
         target_patch, patch_mask = get_target_patch(synthesized_img, potential_map, i, j, kernel_size, diff)  # get the target patch
@@ -144,10 +145,10 @@ def synthesize_texture(example_img:np.ndarray, synth_size:Tuple[int,int], kernel
         best_matching_patch = find_best_matching_patch(example_patches, target_patch, patch_mask, gaussian_kernel, threshold=threshold, attenuation_factor=attenuation_factor)    # BROKEN, NEEDS TO BE FIXED
                 
         # Replace the pixel with the center pixel of the best matching patch
-        synthesized_img[i, j] = np.copy(best_matching_patch[diff, diff])
+        synthesized_img = jax.ops.index_update(synthesized_img, jax.ops.index[i, j], jnp.copy(best_matching_patch[diff, diff]))
         
         # Update the potential map
-        potential_map[i, j] = 0
+        potential_map = jax.ops.index_update(potential_map, jax.ops.index[i, j], 0)
         
     return synthesized_img
 
@@ -164,7 +165,7 @@ if __name__ == '__main__':
 
     image_path = image_paths[-3]
     print(image_path)
-    image_array = np.array(Image.open(image_path))
+    image_array = jnp.array(Image.open(image_path))
 
     for threshold in THRESHOLDS:
         for attenuation_factor in ATTENUATION_FACTORS:
@@ -178,4 +179,3 @@ if __name__ == '__main__':
                         plt.imsave(save_path, synthesized_img)
                         print(f"Synthesized image saved at {save_path}")
                         print(f"\tTime taken: {time.perf_counter() - start} seconds")
-

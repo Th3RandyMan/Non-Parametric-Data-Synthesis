@@ -4,8 +4,11 @@ from typing import Tuple
 import numpy as np
 from PIL import Image
 import time
-import matplotlib.pyplot as plt
 import os
+import torch
+
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
 
 
 # Get patches for the image
@@ -83,23 +86,28 @@ def get_target_patch(synthesized_img:np.ndarray, potential_map:np.ndarray, i:int
 
 def find_best_matching_patch(example_patches:np.ndarray, target_patch:np.ndarray, patch_mask:np.ndarray, gaussian_kernel:np.ndarray, threshold:float = 0.8, attenuation_factor:float=80) -> np.ndarray:
     # Calculate the squared difference between the target patch and all example patches
-    patches = np.copy(example_patches)
-    patches -= target_patch # In place operations is faster than a single line operation
+    #patches = np.copy(example_patches)
+    patches = example_patches - target_patch # In place operations is faster than a single line operation
     patches *= patch_mask
     #patches **= 2
     #patches *= gaussian_kernel  # MIGHT NEED TO MOVE THIS UP ONE LINE, BEFORE SQUARING
     patches *= gaussian_kernel
     patches **= 2
-    squared_diffs = np.sum(patches, axis=(1, 2, 3))
+    #squared_diffs = np.sum(patches, axis=(1, 2, 3))
+    squared_diffs = patches.sum(dim=(1,2,3))
 
     # Convert the squared differences to probabilities
-    prob = 1 - squared_diffs / np.max(squared_diffs)
-    prob *= (prob > threshold*np.max(prob))  # thresholding the probabilities
+    # prob = 1 - squared_diffs / np.max(squared_diffs)
+    # prob *= (prob > threshold*np.max(prob))  # thresholding the probabilities
+    # prob = prob**attenuation_factor  # attenuate the probabilities
+    # prob /= np.sum(prob)  # normalize the probabilities
+    prob = 1 - squared_diffs / squared_diffs.max()
+    prob *= (prob > threshold*prob.max())  # thresholding the probabilities
     prob = prob**attenuation_factor  # attenuate the probabilities
-    prob /= np.sum(prob)  # normalize the probabilities
-    
+    prob /= prob.sum()  # normalize the probabilities
+
     # Find the index of the best matching patch
-    best_matching_patch_index = np.random.choice(np.arange(example_patches.shape[0]), p=prob)
+    best_matching_patch_index = np.random.choice(np.arange(example_patches.shape[0]), p=prob.cpu().numpy())
     
     return example_patches[best_matching_patch_index]
 
@@ -109,10 +117,13 @@ def synthesize_texture(example_img:np.ndarray, synth_size:Tuple[int,int], kernel
     
     # Get patches for the example image
     example_patches = get_patches(example_img, kernel_size) # get all the patches from the example image
+    example_patches_tensor = torch.from_numpy(example_patches).permute(0, 3, 1, 2).cuda()
+
     diff = kernel_size // 2
 
     # Create a Gaussian kernel 
     gaussian_kernel = np.repeat(create_gaussian_kernel(kernel_size, sigma)[:,:,np.newaxis], example_img.shape[-1], axis=2)  # create a Gaussian kernel
+    gaussian_kernel_tensor = torch.from_numpy(gaussian_kernel).unsqueeze(0).permute(0,3,1,2).cuda()
 
     # Get the number of non-zero pixels in the potential map
     n_no_pixels = np.where(potential_map != 0)[0].shape[0]
@@ -141,7 +152,11 @@ def synthesize_texture(example_img:np.ndarray, synth_size:Tuple[int,int], kernel
         # target_patch = synthesized_img[i-diff:i+diff+1, j-diff:j+diff+1, :]
         
         # Find the best matching patch from the example image
-        best_matching_patch = find_best_matching_patch(example_patches, target_patch, patch_mask, gaussian_kernel, threshold=threshold, attenuation_factor=attenuation_factor)    # BROKEN, NEEDS TO BE FIXED
+        target_patch_tensor = torch.from_numpy(target_patch).unsqueeze(0).permute(0, 3, 1, 2).cuda()
+        patch_mask_tensor = torch.from_numpy(patch_mask).unsqueeze(0).permute(0,3,1,2).cuda()
+        
+        best_matching_patch_tensor = find_best_matching_patch(example_patches_tensor, target_patch_tensor, patch_mask_tensor, gaussian_kernel_tensor, threshold=threshold, attenuation_factor=attenuation_factor)
+        best_matching_patch = best_matching_patch_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
                 
         # Replace the pixel with the center pixel of the best matching patch
         synthesized_img[i, j] = np.copy(best_matching_patch[diff, diff])
@@ -156,26 +171,49 @@ if __name__ == '__main__':
     image_paths = glob.glob("Texture Patches/*.png")
 
     SYNTH_SIZE = (530, 530)
-    THRESHOLDS = [0.8, 0.6]
-    ATTENUATION_FACTORS = [80, 10]
-    PATCH_SIZES = [3, 15]
-    KERNEL_SIZES = [9, 11, 15]
-    SIGMAS = [1, 3, 9]
+    THRESHOLDS = [0.8]#, 0.7]
+    ATTENUATION_FACTORS = [80]
+    PATCH_SIZES = [15]
+    KERNEL_SIZES = [15]#[21, 35, 51]
+    SIGMAS = [1]#, 3]
+    RUN_TYPE = 2
 
-    image_path = image_paths[-3]
-    print(image_path)
-    image_array = np.array(Image.open(image_path))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    for threshold in THRESHOLDS:
-        for attenuation_factor in ATTENUATION_FACTORS:
-            for patch_size in PATCH_SIZES:
-                for kernel_size in KERNEL_SIZES:
-                    for sigma in SIGMAS:
-                        start = time.perf_counter()
-                        synthesized_img = synthesize_texture(image_array, SYNTH_SIZE, kernel_size, sigma, patch_size, threshold, attenuation_factor)
-                        # Save the synthesized image using matplotlib
-                        save_path = f"Synthesized Images\img7_{threshold}_{attenuation_factor}_{patch_size}_{kernel_size}_{sigma}.png"
-                        plt.imsave(save_path, synthesized_img)
-                        print(f"Synthesized image saved at {save_path}")
-                        print(f"\tTime taken: {time.perf_counter() - start} seconds")
+    if RUN_TYPE == 1:
+        image_path = image_paths[-3]
+        print(image_path)
+        image_array = np.array(Image.open(image_path))
+
+        for threshold in THRESHOLDS:
+            for attenuation_factor in ATTENUATION_FACTORS:
+                for patch_size in PATCH_SIZES:
+                    for kernel_size in KERNEL_SIZES:
+                        for sigma in SIGMAS:
+                            start = time.perf_counter()
+                            synthesized_img = synthesize_texture(image_array, SYNTH_SIZE, kernel_size, sigma, patch_size, threshold, attenuation_factor)
+                            # Save the synthesized image using matplotlib
+                            save_path = f"Synthesized Images\dimg7_{threshold}_{attenuation_factor}_{patch_size}_{kernel_size}_{sigma}.png"
+                            plt.imsave(save_path, synthesized_img)
+                            print(f"Synthesized image saved at {save_path}")
+                            print(f"\tTime taken: {time.perf_counter() - start} seconds")
+
+    elif RUN_TYPE == 2:
+        for image_path in image_paths:
+            image_array = np.array(Image.open(image_path))
+            name = image_path.split("\\")[-1].split(".")[0]
+            if name == "7":
+                continue
+
+            start = time.perf_counter()
+            synthesized_img = synthesize_texture(image_array, SYNTH_SIZE, KERNEL_SIZES[0], SIGMAS[0], PATCH_SIZES[0], THRESHOLDS[0], ATTENUATION_FACTORS[0])
+            # Save the synthesized image using matplotlib
+            save_path = f"Synthesized Images\img{name}_{THRESHOLDS[0]}_{ATTENUATION_FACTORS[0]}_{PATCH_SIZES[0]}_{KERNEL_SIZES[0]}_{SIGMAS[0]}.png"
+            plt.imsave(save_path, synthesized_img)
+            print(f"Synthesized image saved at {save_path}")
+            print(f"\tTime taken: {time.perf_counter() - start} seconds")
+
+    else:
+        print("Invalid run type. Please select either 1 or 2.")
+
 

@@ -4,11 +4,14 @@ from typing import Tuple
 import numpy as np
 from PIL import Image
 import time
-import matplotlib.pyplot as plt
 import os
+from numba import jit
+
+import matplotlib.pyplot as plt
 
 
 # Get patches for the image
+@jit(nopython=True)
 def get_patches(image_array:np.ndarray, kernel_size:int, stride:int=1) -> np.ndarray:
     patches = []
     for i in range(0, image_array.shape[0]-kernel_size, stride):
@@ -17,12 +20,14 @@ def get_patches(image_array:np.ndarray, kernel_size:int, stride:int=1) -> np.nda
             patches.append(patch)
     return np.array(patches)
 
+@jit(nopython=True)
 def create_gaussian_kernel(kernel_size:int, sigma=None) -> np.ndarray:
     if sigma is None:
         sigma = 0.3 * ((kernel_size - 1) * 0.5 - 1) + 0.8   # Scaling sigma based on kernel size, may need to adjust the coefficients
     kernel = np.fromfunction(lambda x, y: (1/(2*np.pi*sigma**2)) * np.exp(-((x-(kernel_size-1)/2)**2 + (y-(kernel_size-1)/2)**2)/(2*sigma**2)), (kernel_size, kernel_size))
     return kernel / np.sum(kernel)
 
+@jit(nopython=True)
 def initialize_synthesized_image(example_img:np.ndarray, synth_size:Tuple[int,int], patch_size:int=3) -> Tuple[np.ndarray, np.ndarray]:
     diff = patch_size // 2
 
@@ -63,6 +68,7 @@ def initialize_synthesized_image(example_img:np.ndarray, synth_size:Tuple[int,in
 
     return synthesized_img, potential_map 
 
+@jit(nopython=True)
 def get_target_patch(synthesized_img:np.ndarray, potential_map:np.ndarray, i:int, j:int, kernel_size:int, diff:int) -> Tuple[np.ndarray, np.ndarray]:
     # Create a zero matrix to store the target patch
     target_patch = np.zeros((kernel_size, kernel_size, synthesized_img.shape[-1]))
@@ -81,15 +87,14 @@ def get_target_patch(synthesized_img:np.ndarray, potential_map:np.ndarray, i:int
     return target_patch, np.repeat(patch_mask[:,:,np.newaxis], synthesized_img.shape[-1], axis=2)
         
 
+@jit(nopython=True)
 def find_best_matching_patch(example_patches:np.ndarray, target_patch:np.ndarray, patch_mask:np.ndarray, gaussian_kernel:np.ndarray, threshold:float = 0.8, attenuation_factor:float=80) -> np.ndarray:
     # Calculate the squared difference between the target patch and all example patches
     patches = np.copy(example_patches)
     patches -= target_patch # In place operations is faster than a single line operation
     patches *= patch_mask
-    #patches **= 2
-    #patches *= gaussian_kernel  # MIGHT NEED TO MOVE THIS UP ONE LINE, BEFORE SQUARING
-    patches *= gaussian_kernel
     patches **= 2
+    patches *= gaussian_kernel
     squared_diffs = np.sum(patches, axis=(1, 2, 3))
 
     # Convert the squared differences to probabilities
@@ -103,6 +108,7 @@ def find_best_matching_patch(example_patches:np.ndarray, target_patch:np.ndarray
     
     return example_patches[best_matching_patch_index]
 
+@jit(nopython=True)
 def synthesize_texture(example_img:np.ndarray, synth_size:Tuple[int,int], kernel_size:int, sigma:float=3, patch_size:int=3, threshold:float=0.8, attenuation_factor:float=80) -> np.ndarray:
     # Initialize the synthesized image and potential map
     synthesized_img, potential_map = initialize_synthesized_image(example_img, synth_size, patch_size=patch_size)  # get started with a random patch and potential map
@@ -178,4 +184,3 @@ if __name__ == '__main__':
                         plt.imsave(save_path, synthesized_img)
                         print(f"Synthesized image saved at {save_path}")
                         print(f"\tTime taken: {time.perf_counter() - start} seconds")
-
