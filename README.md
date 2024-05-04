@@ -4,6 +4,11 @@ EEC 289A Assignment 2
 ## Overview
 
 
+
+* cimg are without alpha value.
+* dimg and img are with alpha value.
+* pimg are gaussian applied after squared l2-norm.
+
 ## Requirements
 * Numpy
 * Jupyter Notebook
