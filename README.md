@@ -8,6 +8,7 @@ EEC 289A Assignment 2
 * cimg are without alpha value.
 * dimg and img are with alpha value.
 * pimg are gaussian applied after squared l2-norm.
+* zimg are without alpha, gaussian applied after squared norm, and with different distribution estimate.
 
 ## Requirements
 * Numpy

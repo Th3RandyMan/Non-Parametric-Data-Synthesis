@@ -93,13 +93,16 @@ def find_best_matching_patch2(example_patches:np.ndarray, target_patch:np.ndarra
     temp = patch_mask[0]*gaussian_kernel[0]
     squared_diffs /= temp.sum()
 
-    thresh = squared_diffs.min() * (1. + threshold)
+    thresh = squared_diffs.min() * (1. + threshold) # Maybe change this to be a percentage of the range between the min and max squared_diffs
     indices = torch.where(squared_diffs <= thresh)
-    weights = squared_diffs[indices]
-    weights /= weights.sum()
+    if thresh != 0:
+        weights = squared_diffs[indices]
+        weights /= weights.sum()
+    else:
+        weights = torch.ones_like(squared_diffs[indices]) / squared_diffs[indices].shape[0]
     best_matching_index = np.random.choice(np.arange(indices[0].shape[0]), p=weights.cpu(), size=1)[0]
 
-    return example_patches[indices[best_matching_index]]
+    return example_patches[indices[0][best_matching_index]]
 
 def find_best_matching_patch(example_patches:np.ndarray, target_patch:np.ndarray, patch_mask:np.ndarray, gaussian_kernel:np.ndarray, threshold:float = 0.8) -> np.ndarray:
     # Calculate the squared difference between the target patch and all example patches
@@ -184,17 +187,86 @@ def synthesize_texture(example_img:np.ndarray, synth_size:Tuple[int,int], kernel
         
     return synthesized_img
 
+def get_mnist_patches(example_imgs:np.ndarray, kernel_size:int) -> np.ndarray:
+    patches = []
+    for img in example_imgs:
+        patches.append(get_patches(img, kernel_size))
+    return np.array(patches).reshape(-1, kernel_size, kernel_size, example_imgs.shape[-1])
+
+def synthesize_mnist(example_imgs:np.ndarray, synth_size:Tuple[int,int], kernel_size:int, sigma:float=3, patch_size:int=3) -> np.ndarray:
+    # Initialize the synthesized image and potential map
+    synthesized_img, potential_map = initialize_synthesized_image(random.choice(example_imgs), synth_size, patch_size=patch_size)  # get started with a random patch and potential map
+    
+    # Get patches for the example image
+    example_patches = get_mnist_patches(example_imgs, kernel_size) # get all the patches from the example image
+    example_patches_tensor = torch.from_numpy(example_patches).permute(0, 3, 1, 2).cuda()
+
+    diff = kernel_size // 2
+
+    # Create a Gaussian kernel 
+    gaussian_kernel = np.repeat(create_gaussian_kernel(kernel_size, sigma)[:,:,np.newaxis], example_imgs.shape[-1], axis=2)  # create a Gaussian kernel
+    gaussian_kernel_tensor = torch.from_numpy(gaussian_kernel).unsqueeze(0).permute(0,3,1,2).cuda()
+
+    # Get the number of non-zero pixels in the potential map
+    n_no_pixels = np.where(potential_map != 0)[0].shape[0]
+    
+    # Iterate over the pixels in the synthesized image
+    perc = 0.1
+    #print(f"Processing pixel 0 of {n_no_pixels}")
+    for n_pixel in range(n_no_pixels):
+        pe = n_pixel / n_no_pixels
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print(f"Progress: {pe*100:.4f}%")
+        #if pe > perc:
+            #print(f"Processing pixel {n_pixel} of {n_no_pixels}")
+            #break
+            # plt.imshow(synthesized_img)
+            # plt.axis('off')
+            # plt.savefig(f"img7_{perc*100:.1f}.png")
+            # print(f"Processing pixel {n_pixel} of {n_no_pixels}")
+            # perc += 0.1
+
+        # Find the pixel coordinates with the highest potential
+        i, j = np.unravel_index(np.argmax(potential_map), potential_map.shape)  # get the pixel with the highest potential
+        
+        # Get the target patch from the synthesized image
+        target_patch, patch_mask = get_target_patch(synthesized_img, potential_map, i, j, kernel_size, diff)  # get the target patch
+        # target_patch = synthesized_img[i-diff:i+diff+1, j-diff:j+diff+1, :]
+        
+        # Find the best matching patch from the example image
+        target_patch_tensor = torch.from_numpy(target_patch).unsqueeze(0).permute(0, 3, 1, 2).cuda()
+        patch_mask_tensor = torch.from_numpy(patch_mask).unsqueeze(0).permute(0,3,1,2).cuda()
+        
+        #best_matching_patch_tensor = find_best_matching_patch(example_patches_tensor, target_patch_tensor, patch_mask_tensor, gaussian_kernel_tensor, threshold=threshold, attenuation_factor=attenuation_factor)
+        best_matching_patch_tensor = find_best_matching_patch2(example_patches_tensor, target_patch_tensor, patch_mask_tensor, gaussian_kernel_tensor)
+        if len(best_matching_patch_tensor.shape) == 4:
+            best_matching_patch = best_matching_patch_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+        elif len(best_matching_patch_tensor.shape) == 3:
+            best_matching_patch = best_matching_patch_tensor.permute(1, 2, 0).cpu().numpy()
+                
+        # Replace the pixel with the center pixel of the best matching patch
+        synthesized_img[i, j] = np.copy(best_matching_patch[diff, diff])
+        
+        # Update the potential map
+        potential_map[i, j] = 0
+        
+    return synthesized_img
+
+
 if __name__ == '__main__':
     # Get a list of all image file paths in the "Texture Patches" folder
     image_paths = glob.glob("Texture Patches/*.png")
 
-    SYNTH_SIZE = (530, 530)
-    THRESHOLDS = [0.8]#, 0.7]
+    #SYNTH_SIZE = (530, 530)
+    SYNTH_SIZE = (28, 28)   # for mnist
+    THRESHOLDS = [0.8]
     ATTENUATION_FACTORS = [80]
     PATCH_SIZES = [3]
-    KERNEL_SIZES = [15]#[21, 35, 51]
-    SIGMAS = [6.4]#, 3]
-    RUN_TYPE = 2
+    KERNEL_SIZES = [9] # for mnist
+    #KERNEL_SIZES = [15]
+    SIGMAS = [6]              # for mnist
+    #SIGMAS = [6.4]              # 6.4 for 15x15 kernel size
+    RUN_TYPE = 3
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -218,16 +290,35 @@ if __name__ == '__main__':
 
     elif RUN_TYPE == 2:
         for image_path in image_paths:
-            image_array = np.array(Image.open(image_path))[:,:,:-1] # Remove the alpha channel if it exists
+            image_array = np.array(Image.open(image_path))
+            if image_array.shape[-1] == 4:
+                image_array = image_array[:,:,:-1]
             name = image_path.split("\\")[-1].split(".")[0]
-            # if name == "7":
-            #     continue
+            if name == "1" or name == "10":
+                continue
 
             start = time.perf_counter()
             synthesized_img = synthesize_texture(image_array, SYNTH_SIZE, KERNEL_SIZES[0], SIGMAS[0], PATCH_SIZES[0], THRESHOLDS[0], ATTENUATION_FACTORS[0])
             # Save the synthesized image using matplotlib
-            save_path = f"Synthesized Images\cimg{name}_{THRESHOLDS[0]}_{ATTENUATION_FACTORS[0]}_{PATCH_SIZES[0]}_{KERNEL_SIZES[0]}_{SIGMAS[0]}.png"
+            save_path = f"Synthesized Images\zimg{name}_{THRESHOLDS[0]}_{ATTENUATION_FACTORS[0]}_{PATCH_SIZES[0]}_{KERNEL_SIZES[0]}_{SIGMAS[0]}.png"
             plt.imsave(save_path, synthesized_img)
+            print(f"Synthesized image saved at {save_path}")
+            print(f"\tTime taken: {time.perf_counter() - start} seconds")
+
+    elif RUN_TYPE == 3:
+        from keras.datasets import mnist
+
+        (x_train, y_train), (x_test, y_test) = mnist.load_data()
+        images = x_train.reshape(-1, 28, 28, 1)
+        labels = np.unique(y_train)
+        
+        for label in labels:
+            image_array = images[y_train == label]
+            start = time.perf_counter()
+            synthesized_img = synthesize_mnist(image_array, SYNTH_SIZE, KERNEL_SIZES[0], SIGMAS[0], PATCH_SIZES[0])
+            # Save the synthesized image using matplotlib
+            save_path = f"Synthesized MNIST\mnist{label}_{THRESHOLDS[0]}_{ATTENUATION_FACTORS[0]}_{PATCH_SIZES[0]}_{KERNEL_SIZES[0]}_{SIGMAS[0]}.png"
+            plt.imsave(save_path, synthesized_img.squeeze(), cmap='gray')
             print(f"Synthesized image saved at {save_path}")
             print(f"\tTime taken: {time.perf_counter() - start} seconds")
 
